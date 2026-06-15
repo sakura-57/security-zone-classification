@@ -1,0 +1,39 @@
+Tufin Home Assignment | Write-Up
+
+1. EDA
+
+* 10,000 objects (3,000 labeled, 7,000 unlabeled), 500 rules, 9 tags
+* Tags follow a tiered security architecture: Users -> T0_DMZ -> T1_DMZ -> T2_Application -> T3_Database, plus Common_services, Management, Guests, c_TER_CH_SRV
+* 89% of traffic is inter-zone, only 11% intra-zone. Zones connect across tiers, not within
+* Severe selection bias: labeled objects have mean degree 14.9, unlabeled have 25.9. Only 9 of 578 hub nodes are labeled
+* Class imbalance: largest class has 1,100 examples, smallest has 8
+* 23 self-loops and 300 duplicate rows cleaned before modeling
+
+2. Method
+
+Rule co-occurrence voting: for each unlabeled object, find labeled objects on the same side of the same rules (co-sources or co-destinations), predict by majority vote.
+This method was chosen because neighbors have different tags. Alternatives considered: label propagation (rejected - b/c neighbors have different tags), Random Forest on graph features (rejected - feature distributions of labeled and unlabeled data don't overlap well enough).
+
+3. Predictions
+
+predictions.csv contains predicted tags for all 7,000 unlabeled objects.
+
+4. Evaluation
+
+Leave-one-out on labeled data: remove one label, predict it, repeat for all 3,000. Metrics: accuracy, macro F1, weighted F1 (in metrics.csv). Leave-one-out chosen over k-fold because rare classes (8–10 examples) would break stratified splits.
+
+Con: these metrics reflect performance on low-degree labeled objects. Real performance on high-degree unlabeled objects is likely lower and unknown.
+
+5. Discussion
+
+Cons:
+* Selection bias: model trains on easy nodes, predicts hard ones. CV metrics overestimate real accuracy.
+* Rare classes (GUESTS=10, c_TER_CH_SRV=8) have too few examples for reliable prediction.
+* Our model potentially learns from flawed patterns like direct Users->Database access, not from ideal state. 
+
+Next steps:
+* Adding a feature: for each object what kinds of tags/zones they communicate to. Objects might not appear in the same rule, but they can communicate in a similar way.
+* Sanity check for predicted tags. For example, certain tag pairs never connect like c_TER_CH_SRV never talks to Users Networks. If we predict that object is c_TER_CH_SRV but it connects to Users, that prediction is probably wrong.
+* Label a sample of high-degree nodes to reduce selection bias. So that model can train not only on low-degree nodes, but also on high-degree nodes as well.
+* Adding a feature: for each object identify degree (how many in & out communications are there) and split them into groups like high trust, medium trust, low trust. Since we identified high degree object have no label, but low-degree object usually labelled. So we can signal risk analysts to look closely at objects that have low trust feature.
+* Use Random Forest(or any supervised classifier) after adding above mentioned features.
