@@ -2,117 +2,137 @@
 
 > Predicting security-zone tags for unlabeled network objects.
 
-A machine-learning approach to assigning security-zone tags to network objects
-(hosts, services, firewall rules) when only a subset of objects are labeled. The
-project combines a **rule co-occurrence signal** with a **supervised classifier**
-to propagate zone labels across a sparsely-labeled network graph.
+A semi-supervised approach to assigning **security-zone tags** to network objects
+when only a subset of objects are labeled. Given a set of firewall rules
+(directed `src → dst` connections) and a partial set of zone labels, the project
+predicts the most likely zone for every unlabeled object using a
+**rule co-occurrence voting** signal.
+
+The project is documented end-to-end: the main solution, the evaluation, and a
+separate set of prototyped improvements.
 
 ---
 
 ## Table of Contents
 
 - [Problem](#problem)
+- [Data](#data)
 - [Approach](#approach)
 - [Why these choices](#why-these-choices)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
 - [Usage](#usage)
-- [Data](#data)
 - [Results](#results)
-- [Key Decisions & Learnings](#key-decisions--learnings)
-- [Limitations & Future Work](#limitations--future-work)
+- [Future Work](#future-work)
+- [Key Learnings](#key-learnings)
 - [License](#license)
 
 ---
 
 ## Problem
 
-In a firewall / network-security configuration, objects are grouped into
-**security zones** (e.g. internal, DMZ, external). Many objects carry an
-explicit zone tag, but a large share are **unlabeled** — they appear in rules
-and policies without an assigned zone.
+In a firewall / network-security configuration, objects (hosts, services, groups)
+are organized into **security zones**. Some objects carry an explicit zone tag,
+but most do not — they appear in rules without an assigned zone.
 
-The goal is to **predict the most likely security zone** for each unlabeled
-object, so the configuration can be analyzed, audited, and cleaned up
-automatically instead of by hand.
+The goal is to **predict the zone tag for each unlabeled object** so the
+configuration can be audited and cleaned up automatically instead of by hand.
 
-This is a **semi-supervised, multi-class classification** problem on tabular
-and relational (graph-structured) data.
+This is a **semi-supervised, multi-class classification** problem on
+relational (graph-structured) data.
+
+---
+
+## Data
+
+| Item | Value |
+| --- | --- |
+| Total objects | ~10,000 (3,000 labeled / 7,000 unlabeled) |
+| Firewall rules | 500 unique rule IDs, expanded into ~113K directed `src → dst` edges |
+| Zone tags | 9 classes |
+
+The zones follow a **tiered security architecture**:
+`Users → T0_DMZ → T1_DMZ → T2_Application → T3_Database`, plus
+`Common_services`, `Management`, `Guests`, and `c_TER_CH_SRV`.
+
+Two key properties shaped the modeling:
+
+- **Low homophily / mostly inter-zone traffic.** ~89% of connections cross
+  zones; only ~11% are intra-zone. Connected objects usually belong to
+  *different* zones.
+- **Severe selection bias.** Labeled objects have a much lower mean degree
+  (~14.9) than unlabeled ones (~25.9). Only 9 of 578 hub nodes are labeled —
+  the model trains on "easy" low-degree nodes but must predict "hard"
+  high-degree ones.
+
+**Input files** (in `data/`):
+- `rules.csv` — `rule_id, src_obj_id, dst_obj_id`
+- `tags.csv` — `obj_id, tag` (the 3,000 labeled objects)
 
 ---
 
 ## Approach
 
-The pipeline has two complementary signals:
+The **main solution** (`solution.py`) uses a single signal:
 
-1. **Rule co-occurrence voting** — Objects that frequently appear together in
-   the same firewall rules tend to belong to related zones. For each unlabeled
-   object, neighboring labeled objects "vote" for their zone, weighted by
-   co-occurrence frequency. This produces a propagated label signal directly
-   from the rule structure.
-
-2. **Supervised classifier (Random Forest)** — A Random Forest model is trained
-   on labeled objects using their tabular features (and the co-occurrence
-   signal as an engineered feature) to predict the zone for unlabeled objects.
-
-The two signals are combined to produce the final zone prediction for each
-unlabeled object.
+**Rule co-occurrence voting.** For each unlabeled object, find labeled objects
+that appear on the *same side* of the *same rules* (co-sources or
+co-destinations) and predict its tag by majority vote. Confidence is the share
+of votes going to the winning tag.
 
 ```
-raw network objects + rules
+data/rules.csv  +  data/tags.csv
         │
         ▼
-  feature engineering ──► rule co-occurrence matrix
-        │                        │
-        │                        ▼
-        │                 co-occurrence voting
-        ▼                        │
-  Random Forest  ◄───────────────┘
+   clean (drop self-loops & duplicate edges)
         │
         ▼
-  predicted security-zone tags
+   index objects → rules they appear in (as src / as dst)
+        │
+        ▼
+   co-occurrence majority vote
+        │
+        ├──► leave-one-out evaluation  ──► metrics.csv
+        ▼
+   predicted zone tags             ──► predictions.csv
 ```
 
 ---
 
 ## Why these choices
 
-These decisions came out of exploratory analysis of the data, not defaults:
+These decisions came out of EDA, not defaults:
 
-- **Co-occurrence voting over label propagation.** A standard graph label-
-  propagation approach assumes **homophily** — that connected nodes share
-  labels. Measured homophily on this graph was very low (~0.10), meaning
-  connected objects often belong to *different* zones. Label propagation
-  therefore performs poorly here, while direct co-occurrence voting (treating
-  shared-rule membership as the signal) is more robust.
+- **Co-occurrence voting over label propagation.** Standard graph
+  label-propagation assumes **homophily** (connected nodes share labels).
+  Measured homophily here was very low — connected objects mostly belong to
+  *different* zones — so propagation performs poorly. Direct co-occurrence
+  voting (treating shared-rule membership as the signal) is more robust.
 
-- **Random Forest over a linear / single-tree model.** The labeled subset is
-  affected by **selection bias** (labeled objects are not a random sample of
-  all objects). Random Forest's bagging and feature subsampling make it more
-  resilient to that bias and to the mixed, partly-correlated feature set than
-  a single decision tree or a linear model.
+- **Co-occurrence voting over a supervised classifier (for the main approach).**
+  A Random Forest on graph features was considered but **set aside**: the
+  feature distributions of labeled and unlabeled objects don't overlap well
+  enough (selection bias), so a model trained on labeled nodes wouldn't transfer
+  reliably to the unlabeled population.
+
+- **Leave-one-out over k-fold for evaluation.** The rarest classes have only
+  8–10 examples, which would break stratified k-fold splits.
 
 ---
 
 ## Project Structure
 
-> Update this to match your actual files once the code is committed.
-
 ```
 security-zone-classification/
-├── data/                 # input data (gitignored if sensitive)
-│   ├── raw/              # original network objects + rules
-│   └── processed/        # engineered features
-├── src/
-│   ├── features.py       # feature engineering + co-occurrence matrix
-│   ├── voting.py         # rule co-occurrence voting
-│   ├── model.py          # Random Forest training / inference
-│   └── pipeline.py       # end-to-end run
-├── notebooks/
-│   └── eda.ipynb         # exploratory analysis (homophily, class balance)
-├── outputs/              # predictions + reports
-├── requirements.txt
-├── LICENSE
+├── data/
+│   ├── rules.csv         # firewall rules: rule_id, src_obj_id, dst_obj_id
+│   └── tags.csv          # labeled objects: obj_id, tag
+├── solution.py           # main pipeline: load → EDA → voting → eval → predict
+├── improvements.py       # prototyped next steps (not part of the main solution)
+├── predictions.csv       # predicted tags for the 7,000 unlabeled objects
+├── metrics.csv           # leave-one-out evaluation metrics
+├── writeup.txt           # short write-up: EDA, method, evaluation, discussion
+├── LICENSE               # MIT
 └── README.md
 ```
 
@@ -121,97 +141,92 @@ security-zone-classification/
 ## Installation
 
 ```bash
-# clone
 git clone https://github.com/sakura-57/security-zone-classification.git
 cd security-zone-classification
 
-# create environment
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-# install dependencies
-pip install -r requirements.txt
+pip install pandas numpy scikit-learn matplotlib seaborn networkx
 ```
 
-**Requirements:** Python 3.10+, `pandas`, `numpy`, `scikit-learn`
-(add `networkx` if you build an explicit graph). Pin versions in
-`requirements.txt`.
+**Requirements:** Python 3.10+, `pandas`, `numpy`, `scikit-learn`, `matplotlib`,
+`seaborn`, `networkx`.
+*(No `requirements.txt` is committed yet — consider adding one to pin versions.)*
 
 ---
 
 ## Usage
 
-> Adjust to your actual entry point.
+Run the main solution (writes `predictions.csv` and `metrics.csv`):
 
 ```bash
-# run the full pipeline: features → voting → model → predictions
-python src/pipeline.py --input data/raw/objects.csv --output outputs/predictions.csv
+python solution.py
 ```
 
-Or step by step:
+Run the improvement prototypes (depends on `predictions.csv`
+produced by `solution.py`):
 
 ```bash
-python src/features.py    # build features + co-occurrence matrix
-python src/voting.py      # generate co-occurrence vote signal
-python src/model.py       # train Random Forest and predict
+python improvements.py
 ```
-
-Output is a table of objects with their **predicted security zone** and a
-**confidence / vote score**.
-
----
-
-## Data
-
-Each network object has tabular attributes plus its membership in firewall
-rules. A subset carry a ground-truth `zone` label; the rest are unlabeled and
-are the prediction target.
-
-> Note whether the dataset is included, synthetic, or private. If it can't be
-> shared, describe the schema (columns, label values) so others can adapt the
-> code to their own data.
 
 ---
 
 ## Results
 
-> Fill in with your actual evaluation once finalized.
+Evaluated with **leave-one-out** over the 3,000 labeled objects
+(values from `metrics.csv`):
 
 | Metric | Value |
 | --- | --- |
-| Accuracy (held-out labeled) | _e.g. 0.XX_ |
-| Macro F1 | _e.g. 0.XX_ |
-| Per-zone F1 | _e.g. internal 0.XX / DMZ 0.XX / external 0.XX_ |
+| Accuracy | 0.890 |
+| Precision (macro) | 0.507 |
+| Recall (macro) | 0.474 |
+| F1 (macro) | 0.484 |
+| F1 (weighted) | 0.870 |
 
-Evaluation was done on a held-out portion of the **labeled** objects, with
-attention to per-zone performance given class imbalance.
+**Reading the numbers honestly:** high accuracy / weighted-F1 are driven by the
+large, well-connected classes. The much lower **macro** scores reflect poor
+performance on rare classes (e.g. `Guests` ≈ 10, `c_TER_CH_SRV` ≈ 8 examples).
+Because evaluation runs on low-degree labeled nodes, these metrics likely
+**overestimate** real performance on the high-degree unlabeled objects that are
+the actual prediction target.
 
----
-
-## Key Decisions & Learnings
-
-- **Measure homophily before reaching for graph methods.** Low homophily
-  (~0.10) ruled out label propagation and pointed to co-occurrence voting.
-- **Account for selection bias** in how labeled objects were sampled — it shaped
-  both the model choice (Random Forest) and how results were interpreted.
-- **Combine a structural signal (rule co-occurrence) with a feature-based
-  classifier** rather than relying on either alone.
+`predictions.csv` contains predicted tags for all 7,000 unlabeled objects.
 
 ---
 
-## Limitations & Future Work
+## Future Work
 
-- Co-occurrence voting depends on objects sharing rules; isolated objects get a
-  weak signal.
-- Selection bias in labels limits how far held-out metrics generalize to the
-  truly-unlabeled population.
-- Possible extensions: calibrated probabilities, graph neural networks if
-  homophily improves with richer edges, active learning to label the most
-  informative objects first.
+Prototyped in `improvements.py` (not part of the main solution):
+
+1. **Weighted voting** — weight votes by inverse class frequency so rare classes
+   aren't drowned out by common ones.
+2. **Connection-profile features** — for each object, build in/out tag
+   distributions, degree features, and unknown-neighbor fractions, capturing
+   *how* an object communicates rather than just who it shares a rule with.
+3. **Random Forest on those profiles** — with `class_weight='balanced'` to handle
+   imbalance, once the labeled/unlabeled feature gap is addressed.
+4. **Zero-traffic / forbidden-pair validation** — flag predictions that imply
+   tag pairs which never co-occur in the labeled data (e.g. `c_TER_CH_SRV → Users`)
+   as likely errors.
+5. **Reduce selection bias** — label a sample of high-degree hub nodes so the
+   model can learn from hard cases, not only easy ones.
+
+---
+
+## Key Learnings
+
+- **Measure homophily before reaching for graph methods.** Low homophily ruled
+  out label propagation and pointed to co-occurrence voting.
+- **Account for selection bias** in how labels were sampled — it shaped both the
+  method choice and how the metrics should be interpreted.
+- **Macro vs weighted metrics tell different stories** under class imbalance;
+  report both and explain the gap.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file
-for details.
+MIT — see [LICENSE](LICENSE).
