@@ -1,5 +1,5 @@
 """
-# Tufin Home Assignment | Security Zone Tag Prediction
+# Security Zone Tag Prediction
 """
 import pandas as pd
 import numpy as np
